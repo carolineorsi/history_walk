@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>History Walk</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700;800&family=Inter:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+  <div id="map"></div>
+
+  <div id="headsign">
+    <div id="badge" class="badge empty">HW</div>
+    <form id="directions-form" autocomplete="off">
+      <div class="addr-row">
+        <div class="addr-field-wrap">
+          <input id="start-input" class="addr-input" type="text" placeholder="Start address" maxlength="200">
+          <div id="start-suggestions" class="addr-suggestions"></div>
+        </div>
+        <button id="use-my-location-btn" type="button" title="Use my location" aria-label="Use my location">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M12 2v3M12 19v3M2 12h3M19 12h3"></path>
+          </svg>
+        </button>
+      </div>
+      <div class="addr-row">
+        <div class="addr-field-wrap">
+          <input id="end-input" class="addr-input" type="text" placeholder="End address" maxlength="200">
+          <div id="end-suggestions" class="addr-suggestions"></div>
+        </div>
+        <button id="get-directions-btn" type="submit" title="Get walking directions" aria-label="Get walking directions">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M5 12h14M13 6l6 6-6 6"></path>
+          </svg>
+        </button>
+      </div>
+    </form>
+  </div>
+
+  <div id="empty-hint">Enter a start and end address (or tap the compass to use your current location as the start), then get walking directions.</div>
+  <div id="error-toast"></div>
+
+  <select id="basemap-select" title="Map style" aria-label="Map style">
+    <option value="dark">Dark</option>
+    <option value="light" selected>Light</option>
+    <option value="streets">Streets</option>
+    <option value="satellite">Satellite</option>
+    <option value="topo">Topo</option>
+  </select>
+
+  <button id="history-fab-btn" class="fab-btn" title="Search historical sites along the route" aria-label="Search historical sites along the route">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6M9 11h.01M15 11h.01M9 15h.01M15 15h.01"></path>
+    </svg>
+  </button>
+
+  <div id="panel-stack">
+    <div id="info-card" class="floating-panel">
+      <div class="info-row">
+        <div class="info-title" id="info-title">—</div>
+        <span id="info-summary"></span>
+        <button id="collapse-btn" title="Collapse panel" aria-label="Collapse panel">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M6 9l6 6 6-6"></path>
+          </svg>
+        </button>
+      </div>
+
+      <div id="info-card-body">
+      <div id="route-summary-block">
+        <div class="route-summary-figures">
+          <div class="route-figure">
+            <span id="route-distance">—</span>
+            <span class="stat-label">Distance</span>
+          </div>
+          <div class="route-figure">
+            <span id="route-duration">—</span>
+            <span class="stat-label">Walking time</span>
+          </div>
+        </div>
+      </div>
+
+      <div id="steps-block">
+        <button id="steps-toggle-btn" type="button">
+          <span>Turn-by-turn directions</span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M6 9l6 6 6-6"></path>
+          </svg>
+        </button>
+        <ol id="steps-list"></ol>
+      </div>
+      </div>
+    </div>
+
+    <div id="history-card" class="floating-panel">
+      <div class="info-row">
+        <div class="info-title">Historical sites along the route</div>
+        <button id="history-close-btn" class="panel-close-btn" title="Close" aria-label="Close">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M6 6l12 12M18 6L6 18"></path>
+          </svg>
+        </button>
+      </div>
+      <div class="panel-body">
+        <button id="history-search-btn" type="button" class="history-search-btn">Search historical sites along the route</button>
+        <div id="history-search-status"></div>
+        <div id="history-search-result-row">
+          <span id="history-search-result-count"></span>
+          <div class="history-result-actions">
+            <button id="history-show-more-btn" type="button">Show more</button>
+            <button id="history-clear-btn" type="button">Clear</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
