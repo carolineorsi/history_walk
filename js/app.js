@@ -344,6 +344,7 @@
   wireAddressInput('start');
   wireAddressInput('end');
   setActiveField('start');
+  updateHistorySearchButtonLabel();
 
   document.getElementById('use-my-location-btn').addEventListener('click', ()=>{
     if(!('geolocation' in navigator)){
@@ -514,6 +515,7 @@
     document.getElementById('info-card').classList.add('visible');
     document.getElementById('empty-hint').classList.add('hidden');
     document.getElementById('history-fab-btn').classList.add('visible');
+    updateHistorySearchButtonLabel();
   }
 
   // =====================================================================
@@ -522,19 +524,22 @@
   // Pipeline: hardcoded OpenStreetMap tag filters (historic=*, heritage=*,
   // tourism=museum — this app only ever searches for one thing, so there's
   // no need for muni_walk's free-text "interpret" AI step) -> Overpass API
-  // returns candidates in a box around the route -> Wikipedia's geosearch
-  // and the National Register of Historic Places (NRHP) are queried over
-  // the same box and merged in, each deduplicated against what's already
-  // found, since OSM's historic tagging alone skews toward monuments and
-  // plaques -> candidates are filtered to those within 1/4 mile of the
-  // drawn route line -> sorted by closeness -> the top 20 are plotted, with
-  // a "Show more" button to reveal the next batch -> the AI proxy writes a
+  // returns candidates in a box around the route (or, with no active route,
+  // around the user's current location) -> Wikipedia's geosearch and the
+  // National Register of Historic Places (NRHP) are queried over the same
+  // box and merged in, each deduplicated against what's already found,
+  // since OSM's historic tagging alone skews toward monuments and plaques
+  // -> candidates are filtered to those within 1/4 mile of the drawn route
+  // line, or within 1/2 mile of the user when searching near their current
+  // location -> sorted by closeness -> the top 20 are plotted, with a
+  // "Show more" button to reveal the next batch -> the AI proxy writes a
   // richer description for each OSM/NRHP result on demand ("Tell me more");
   // Wikipedia-sourced results already carry their own summary. The AI never
   // invents a location — coordinates always come straight from OpenStreetMap,
   // Wikipedia, or the National Park Service.
   // =====================================================================
-  const POI_RADIUS_METERS = 0.25 * 1609.344; // quarter mile
+  const POI_ROUTE_RADIUS_METERS = 0.25 * 1609.344; // quarter mile, along the route
+  const POI_NEARBY_RADIUS_METERS = 0.5 * 1609.344; // half mile, near current location
   const POI_MAX_RESULTS = 20;
 
   const OVERPASS_ENDPOINTS = [
@@ -590,13 +595,22 @@
   // point-to-route distance filter runs.
   function routeBBoxPadded(){
     if(!routeBounds) return null;
-    const padMeters = POI_RADIUS_METERS + 150;
+    const padMeters = POI_ROUTE_RADIUS_METERS + 150;
     const south = routeBounds.getSouth(), north = routeBounds.getNorth();
     const west = routeBounds.getWest(), east = routeBounds.getEast();
     const midLat = (south + north) / 2;
     const latPad = padMeters / 111320;
     const lonPad = padMeters / (111320 * Math.cos(midLat * Math.PI / 180));
     return { south: south - latPad, north: north + latPad, west: west - lonPad, east: east + lonPad };
+  }
+
+  // Same idea as routeBBoxPadded, but centered on a single point — used for
+  // the "search near my current location" fallback when there's no route.
+  function pointBBoxPadded(lat, lon, radiusMeters){
+    const padMeters = radiusMeters + 150;
+    const latPad = padMeters / 111320;
+    const lonPad = padMeters / (111320 * Math.cos(lat * Math.PI / 180));
+    return { south: lat - latPad, north: lat + latPad, west: lon - lonPad, east: lon + lonPad };
   }
 
   function sleep(ms){ return new Promise(resolve => setTimeout(resolve, ms)); }
@@ -874,87 +888,133 @@
     historyShownCount += list.length;
   }
 
-  async function runHistoricalSearch(){
-    if(!routeBounds){
-      renderHistoryStatus('Get walking directions first.', true);
+  // Runs the shared OSM + Wikipedia + NRHP lookup over a bounding box and
+  // returns the merged, deduplicated candidate list (unfiltered by
+  // distance) — shared by both the along-route and near-me searches below.
+  // Returns null if a newer search superseded this one mid-flight.
+  async function fetchHistoricalCandidates(bbox, token){
+    renderHistoryStatus('Searching OpenStreetMap for historical sites…');
+    const overpassQuery = buildOverpassQuery(HISTORICAL_OSM_GROUPS, bbox);
+    const elements = await fetchOverpass(overpassQuery);
+    if(token !== historySearchToken) return null;
+
+    const seen = new Set();
+    const candidates = [];
+    elements.forEach(el=>{
+      const lat = el.lat != null ? el.lat : (el.center && el.center.lat);
+      const lon = el.lon != null ? el.lon : (el.center && el.center.lon);
+      const tags = el.tags || {};
+      const name = tags.name;
+      if(lat == null || lon == null || !name) return;
+      const id = el.type + '/' + el.id;
+      if(seen.has(id)) return;
+      seen.add(id);
+      candidates.push({ id, name, lat, lon, tags });
+    });
+
+    try{
+      renderHistoryStatus('Checking Wikipedia for nearby articles…');
+      const articles = await fetchWikipediaArticlesInBBox(bbox);
+      if(token !== historySearchToken) return null;
+      articles.forEach(a=>{
+        if(isDuplicateOfCandidate(a, candidates)) return;
+        candidates.push({
+          id: a.id, name: a.name, lat: a.lat, lon: a.lon,
+          tags: { historic: 'yes', wikipedia: 'en:' + a.name },
+          wikiExtract: a.extract || null
+        });
+      });
+    }catch(e){
+      console.warn('[history-walk] Wikipedia geosearch unavailable:', e);
+    }
+
+    try{
+      renderHistoryStatus('Checking the National Register of Historic Places…');
+      const nrhpListings = await fetchNrhpListingsInBBox(bbox);
+      if(token !== historySearchToken) return null;
+      nrhpListings.forEach(nr=>{
+        if(isDuplicateOfCandidate(nr, candidates)) return;
+        const tags = { historic: 'yes' };
+        if(nr.address) tags['addr:street'] = nr.address;
+        candidates.push({
+          id: nr.id, name: nr.name, lat: nr.lat, lon: nr.lon, tags,
+          nrhpRefNum: nr.refNum, nrhpYear: nr.year, nrhpDocUrl: nr.docUrl
+        });
+      });
+    }catch(e){
+      console.warn('[history-walk] National Register lookup unavailable:', e);
+    }
+
+    return candidates;
+  }
+
+  // Applies the distance filter/sort/plot steps shared by both search modes.
+  function finishHistoricalSearch(inRangeCandidates, noneFoundMessage){
+    if(!inRangeCandidates.length){
+      renderHistoryStatus(noneFoundMessage, false);
       return;
     }
+    poiLayerGroup.clearLayers();
+    historyCandidatesById = {};
+    historyShownCount = 0;
+    historyRankedPool = inRangeCandidates.slice().sort((a,b) => a.distMeters - b.distMeters);
+    renderHistoryMarkerBatch(historyRankedPool.slice(0, POI_MAX_RESULTS));
+
+    renderHistoryStatus('');
+    renderHistoryResultRow(historyShownCount, historyRankedPool.length);
+    updateHistoryShowMoreButton();
+  }
+
+  function getCurrentPosition(){
+    return new Promise((resolve, reject)=>{
+      navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 });
+    });
+  }
+
+  async function runHistoricalSearch(){
     const token = ++historySearchToken;
     const btn = document.getElementById('history-search-btn');
     btn.disabled = true;
     clearHistoryResults();
-    renderHistoryStatus('Searching OpenStreetMap for historical sites…');
 
     try{
-      const bbox = routeBBoxPadded();
-      const overpassQuery = buildOverpassQuery(HISTORICAL_OSM_GROUPS, bbox);
-      const elements = await fetchOverpass(overpassQuery);
-      if(token !== historySearchToken) return;
-
-      const seen = new Set();
-      const candidates = [];
-      elements.forEach(el=>{
-        const lat = el.lat != null ? el.lat : (el.center && el.center.lat);
-        const lon = el.lon != null ? el.lon : (el.center && el.center.lon);
-        const tags = el.tags || {};
-        const name = tags.name;
-        if(lat == null || lon == null || !name) return;
-        const id = el.type + '/' + el.id;
-        if(seen.has(id)) return;
-        seen.add(id);
-        candidates.push({ id, name, lat, lon, tags });
-      });
-
-      try{
-        renderHistoryStatus('Checking Wikipedia for nearby articles…');
-        const articles = await fetchWikipediaArticlesInBBox(bbox);
-        if(token !== historySearchToken) return;
-        articles.forEach(a=>{
-          if(isDuplicateOfCandidate(a, candidates)) return;
-          candidates.push({
-            id: a.id, name: a.name, lat: a.lat, lon: a.lon,
-            tags: { historic: 'yes', wikipedia: 'en:' + a.name },
-            wikiExtract: a.extract || null
-          });
-        });
-      }catch(e){
-        console.warn('[history-walk] Wikipedia geosearch unavailable:', e);
-      }
-
-      try{
-        renderHistoryStatus('Checking the National Register of Historic Places…');
-        const nrhpListings = await fetchNrhpListingsInBBox(bbox);
-        if(token !== historySearchToken) return;
-        nrhpListings.forEach(nr=>{
-          if(isDuplicateOfCandidate(nr, candidates)) return;
-          const tags = { historic: 'yes' };
-          if(nr.address) tags['addr:street'] = nr.address;
-          candidates.push({
-            id: nr.id, name: nr.name, lat: nr.lat, lon: nr.lon, tags,
-            nrhpRefNum: nr.refNum, nrhpYear: nr.year, nrhpDocUrl: nr.docUrl
-          });
-        });
-      }catch(e){
-        console.warn('[history-walk] National Register lookup unavailable:', e);
-      }
-
-      candidates.forEach(c=>{ c.distMeters = distanceToRouteMeters([c.lat, c.lon]); });
-      const inRange = candidates.filter(c => c.distMeters <= POI_RADIUS_METERS);
-
-      if(!inRange.length){
-        renderHistoryStatus('No historical sites found within 1/4 mile of this route.', false);
+      if(routeBounds){
+        const candidates = await fetchHistoricalCandidates(routeBBoxPadded(), token);
+        if(!candidates) return;
+        candidates.forEach(c=>{ c.distMeters = distanceToRouteMeters([c.lat, c.lon]); });
+        finishHistoricalSearch(
+          candidates.filter(c => c.distMeters <= POI_ROUTE_RADIUS_METERS),
+          'No historical sites found within 1/4 mile of this route.'
+        );
         return;
       }
 
-      poiLayerGroup.clearLayers();
-      historyCandidatesById = {};
-      historyShownCount = 0;
-      historyRankedPool = inRange.slice().sort((a,b) => a.distMeters - b.distMeters);
-      renderHistoryMarkerBatch(historyRankedPool.slice(0, POI_MAX_RESULTS));
+      // No active route — fall back to searching around the user's current
+      // location instead of requiring a route first.
+      if(!('geolocation' in navigator)){
+        renderHistoryStatus('This browser does not support geolocation.', true);
+        return;
+      }
+      renderHistoryStatus('Finding your current location…');
+      let pos;
+      try{
+        pos = await getCurrentPosition();
+      }catch(geoErr){
+        if(token !== historySearchToken) return;
+        console.warn('[history-walk] geolocation failed:', geoErr);
+        renderHistoryStatus('Location access was blocked or unavailable.', true);
+        return;
+      }
+      if(token !== historySearchToken) return;
+      const lat = pos.coords.latitude, lon = pos.coords.longitude;
 
-      renderHistoryStatus('');
-      renderHistoryResultRow(historyShownCount, historyRankedPool.length);
-      updateHistoryShowMoreButton();
+      const candidates = await fetchHistoricalCandidates(pointBBoxPadded(lat, lon, POI_NEARBY_RADIUS_METERS), token);
+      if(!candidates) return;
+      candidates.forEach(c=>{ c.distMeters = haversine(lat, lon, c.lat, c.lon); });
+      finishHistoricalSearch(
+        candidates.filter(c => c.distMeters <= POI_NEARBY_RADIUS_METERS),
+        'No historical sites found within half a mile of your location.'
+      );
     }catch(e){
       if(token !== historySearchToken) return;
       console.error('[history-walk] historical site search failed:', e);
@@ -962,6 +1022,12 @@
     }finally{
       if(token === historySearchToken) btn.disabled = false;
     }
+  }
+
+  function updateHistorySearchButtonLabel(){
+    document.getElementById('history-search-btn').textContent = routeBounds
+      ? 'Search historical sites along the route'
+      : 'Search historical sites near my location';
   }
 
   document.getElementById('history-search-btn').addEventListener('click', ()=> runHistoricalSearch());
@@ -1041,6 +1107,51 @@
     fabBtn.classList.add('active');
     infoCard.classList.add('collapsed');
   }
+
+  // ---------- Clear directions ----------
+  // Resets the route back to its pre-search state: cancels any in-flight
+  // route/history requests, clears the map layers and endpoint pins, blanks
+  // the address inputs, and hides the route/history panels. Historical-site
+  // results are cleared too since an along-route result set no longer
+  // corresponds to anything once the route is gone.
+  function clearDirections(){
+    routeRequestToken++;
+    historySearchToken++;
+    document.getElementById('get-directions-btn').disabled = false;
+
+    routeLayerGroup.clearLayers();
+    endpointLayerGroup.clearLayers();
+    routeSegments = [];
+    routeBounds = null;
+    startPoint = null;
+    endPoint = null;
+    startMarker = null;
+    endMarker = null;
+
+    document.getElementById('start-input').value = '';
+    document.getElementById('end-input').value = '';
+    hideSuggestions('start');
+    hideSuggestions('end');
+    setActiveField('start');
+
+    document.getElementById('route-distance').textContent = '—';
+    document.getElementById('route-duration').textContent = '—';
+    document.getElementById('info-summary').textContent = '';
+    document.getElementById('steps-list').innerHTML = '';
+    document.getElementById('steps-block').classList.remove('expanded');
+
+    infoCard.classList.remove('visible', 'collapsed');
+    document.getElementById('empty-hint').classList.remove('hidden');
+
+    clearHistoryResults();
+    closeSidePanel(historyCard, historyFabBtn);
+    historyFabBtn.classList.remove('visible');
+
+    document.getElementById('history-search-btn').disabled = false;
+    updateHistorySearchButtonLabel();
+  }
+
+  document.getElementById('clear-directions-btn').addEventListener('click', clearDirections);
 
   historyFabBtn.addEventListener('click', ()=>{
     if(historyCard.classList.contains('visible')) closeSidePanel(historyCard, historyFabBtn);
