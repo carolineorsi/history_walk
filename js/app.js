@@ -100,12 +100,19 @@
   let endMarker = null;
 
   // ---------- Endpoints (address inputs, geocoding, draggable pins) ----------
-  const NOMINATIM_SEARCH_ENDPOINT = "https://nominatim.openstreetmap.org/search";
+  // Mapbox powers both geocoding (search-as-you-type + reverse) and walking
+  // directions. Unlike the Anthropic key in worker/, this is a *public*
+  // Mapbox token — that's Mapbox's own intended model for browser use, not
+  // a shortcut — so it's safe to ship in client JS as long as it's scoped
+  // with URL restrictions in the Mapbox dashboard (Tokens -> your token ->
+  // Allowed URLs, e.g. "https://carolineorsi.github.io/*") rather than left
+  // wide open. Create a token at https://account.mapbox.com/access-tokens/
+  // and paste it below.
+  const MAPBOX_ACCESS_TOKEN = "pk.eyJ1IjoiY2Fyb2xpbmVvcnNpIiwiYSI6ImNtc200eHk2aTFjcDAyd29vMmVvbDJ5aDcifQ.by5XT3Af1XLQU3u6bQyp8A";
 
-  // FOSSGIS's public OSRM foot-routing instance — free, keyless, CORS-enabled.
-  // Best-effort public infrastructure with no SLA, same trade-off muni_walk
-  // already accepts for Overpass.
-  const OSRM_FOOT_ENDPOINT = "https://routing.openstreetmap.de/routed-foot/route/v1/foot/";
+  const MAPBOX_GEOCODING_FORWARD_ENDPOINT = "https://api.mapbox.com/search/geocode/v6/forward";
+  const MAPBOX_GEOCODING_REVERSE_ENDPOINT = "https://api.mapbox.com/search/geocode/v6/reverse";
+  const MAPBOX_DIRECTIONS_ENDPOINT = "https://api.mapbox.com/directions/v5/mapbox/walking/";
 
   // Cloudflare Worker proxy that holds the Anthropic API key server-side,
   // used only to write a short, web-search-grounded description of a single
@@ -145,8 +152,8 @@
     setEndpointMarker(which, lat, lon);
   }
 
-  // ---------- Click/drag-to-place — a fallback for addresses Nominatim's
-  // search can't find ----------
+  // ---------- Click/drag-to-place — a fallback for addresses geocoding
+  // can't find ----------
   // Which field a map click sets. 'start' by default so a first-time user
   // can place the start pin immediately; auto-advances to the other field
   // once one point is set, and disarms (null) once both are, so a stray
@@ -166,15 +173,18 @@
     else setActiveField(null);
   }
 
-  const NOMINATIM_REVERSE_ENDPOINT = "https://nominatim.openstreetmap.org/reverse";
+  function placeLabel(feature){
+    const p = feature && feature.properties;
+    return (p && (p.full_address || p.place_formatted || p.name)) || null;
+  }
 
   async function reverseGeocodeLabel(lat, lon){
     try{
-      const params = new URLSearchParams({ format: 'jsonv2', lat: String(lat), lon: String(lon), zoom: '18', addressdetails: '0' });
-      const res = await fetch(NOMINATIM_REVERSE_ENDPOINT + '?' + params.toString());
+      const params = new URLSearchParams({ longitude: String(lon), latitude: String(lat), access_token: MAPBOX_ACCESS_TOKEN });
+      const res = await fetch(MAPBOX_GEOCODING_REVERSE_ENDPOINT + '?' + params.toString());
       if(!res.ok) return null;
       const data = await res.json();
-      return (data && data.display_name) || null;
+      return placeLabel(data.features && data.features[0]) || null;
     }catch(e){
       return null;
     }
@@ -221,10 +231,17 @@
   }
 
   async function geocodeQuery(query, limit){
-    const params = new URLSearchParams({ format: 'jsonv2', q: query, limit: String(limit || 5), addressdetails: '0' });
-    const res = await fetch(NOMINATIM_SEARCH_ENDPOINT + '?' + params.toString());
+    const params = new URLSearchParams({ q: query, access_token: MAPBOX_ACCESS_TOKEN, autocomplete: 'true', limit: String(limit || 5) });
+    const center = map.getCenter();
+    params.set('proximity', center.lng.toFixed(5) + ',' + center.lat.toFixed(5)); // bias results toward what's on screen
+    const res = await fetch(MAPBOX_GEOCODING_FORWARD_ENDPOINT + '?' + params.toString());
     if(!res.ok) throw new Error('Address search failed (' + res.status + ')');
-    return res.json();
+    const data = await res.json();
+    return (data.features || []).map(f => ({
+      lat: f.geometry.coordinates[1],
+      lon: f.geometry.coordinates[0],
+      display_name: placeLabel(f) || ''
+    }));
   }
 
   const suggestionState = { start: { items: [], highlighted: -1 }, end: { items: [], highlighted: -1 } };
@@ -287,7 +304,7 @@
       }catch(e){
         console.warn('[history-walk] geocode search failed:', e);
       }
-    }, 600); // Nominatim's usage policy caps at ~1 req/sec
+    }, 250); // Mapbox's geocoder is built for live search-as-you-type, unlike Nominatim
 
     input.addEventListener('input', ()=>{
       if(which === 'start') startPoint = null; else endPoint = null; // typing invalidates the previously resolved point
@@ -393,7 +410,7 @@
     }
   });
 
-  // ---------- Walking route (OSRM) ----------
+  // ---------- Walking route (Mapbox Directions) ----------
   let routeRequestToken = 0;
 
   async function requestRoute(){
@@ -427,45 +444,11 @@
     return h + 'h' + (m ? ' ' + m + 'm' : '');
   }
 
-  const MANEUVER_MODIFIER_PHRASE = {
-    'uturn': 'Make a U-turn',
-    'sharp right': 'Turn sharp right',
-    'right': 'Turn right',
-    'slight right': 'Turn slightly right',
-    'straight': 'Continue straight',
-    'slight left': 'Turn slightly left',
-    'left': 'Turn left',
-    'sharp left': 'Turn sharp left'
-  };
-
-  // Turns an OSRM maneuver (type + modifier) into plain walking-directions text.
-  function maneuverPhrase(type, modifier){
-    const modPhrase = MANEUVER_MODIFIER_PHRASE[modifier];
-    switch(type){
-      case 'depart': return 'Head out';
-      case 'arrive': return 'Arrive at your destination';
-      case 'turn': return modPhrase || 'Turn';
-      case 'continue': return modPhrase || 'Continue';
-      case 'new name': return modPhrase || 'Continue';
-      case 'merge': return modPhrase || 'Merge';
-      case 'end of road': return modPhrase || 'Continue';
-      case 'fork': return modPhrase ? ('Keep ' + modPhrase.replace(/^(Turn|Continue) /, '').toLowerCase()) : 'Continue at the fork';
-      case 'roundabout':
-      case 'rotary': return 'Enter the roundabout';
-      case 'exit roundabout':
-      case 'exit rotary': return 'Exit the roundabout';
-      case 'on ramp': return modPhrase || 'Take the ramp';
-      case 'off ramp': return modPhrase || 'Take the exit';
-      default: return modPhrase || 'Continue';
-    }
-  }
-
-  function describeStep(step, isLast){
-    const streetName = step.name && step.name.trim();
-    if(isLast || step.maneuver.type === 'arrive') return 'Arrive at your destination.';
-    if(step.maneuver.type === 'depart') return streetName ? ('Head out on ' + streetName + '.') : 'Head out.';
-    const phrase = maneuverPhrase(step.maneuver.type, step.maneuver.modifier);
-    return streetName ? (phrase + ' onto ' + streetName + '.') : (phrase + '.');
+  // Mapbox's own step objects already carry a ready-made human-readable
+  // instruction (e.g. "Turn left onto Adalbertstraße"), unlike OSRM's bare
+  // maneuver type/modifier — no need to build the phrase ourselves.
+  function describeStep(step){
+    return (step.maneuver && step.maneuver.instruction) || 'Continue.';
   }
 
   function renderSteps(steps){
@@ -489,7 +472,8 @@
     document.getElementById('history-search-btn').disabled = false;
 
     const coordStr = start.lon + ',' + start.lat + ';' + end.lon + ',' + end.lat;
-    const url = OSRM_FOOT_ENDPOINT + coordStr + '?overview=full&geometries=geojson&steps=true';
+    const params = new URLSearchParams({ overview: 'full', geometries: 'geojson', steps: 'true', access_token: MAPBOX_ACCESS_TOKEN });
+    const url = MAPBOX_DIRECTIONS_ENDPOINT + coordStr + '?' + params.toString();
     const res = await fetch(url);
     if(token !== routeRequestToken) return;
     if(!res.ok){
@@ -499,7 +483,7 @@
     const data = await res.json();
     if(token !== routeRequestToken) return;
     if(data.code !== 'Ok' || !data.routes || !data.routes.length){
-      throw new Error("Couldn't find a walking route between those two points.");
+      throw new Error(data.message || "Couldn't find a walking route between those two points.");
     }
 
     const route = data.routes[0];
@@ -524,7 +508,7 @@
     updateInfoSummary();
 
     const steps = (route.legs && route.legs[0] && route.legs[0].steps) || [];
-    renderSteps(steps.map((s, i)=> ({ text: describeStep(s, i === steps.length - 1), distance: s.distance })));
+    renderSteps(steps.map(s => ({ text: describeStep(s), distance: s.distance })));
 
     document.getElementById('info-card').classList.remove('collapsed');
     document.getElementById('info-card').classList.add('visible');

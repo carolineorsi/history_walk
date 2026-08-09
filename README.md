@@ -5,11 +5,14 @@ discovering the historical sites along the way.
 
 ## Features
 
-- **Walking directions** — type a start and end address (or tap the compass
-  icon to use your current location as the start), and the app draws a
-  walking route between them with total distance, estimated walking time,
-  and a turn-by-turn direction list. Either endpoint's pin can be dragged to
-  fine-tune it, which re-requests the route automatically.
+- **Walking directions** — type a start and end address (with live
+  autocomplete), tap the compass icon to use your current location as the
+  start, or click directly on the map to drop a pin for whichever field is
+  outlined in amber — useful when an address doesn't geocode cleanly. The
+  app draws a walking route between the two points with total distance,
+  estimated walking time, and a turn-by-turn direction list. Either
+  endpoint's pin can be dragged to fine-tune it (with its address label
+  updating to match), which re-requests the route automatically.
 - **Historical sites along the route** — once a route is drawn, a button
   searches for historical sites within 1/4 mile of it, pulling from three
   sources: OpenStreetMap (`historic=*`, `heritage=*`, and museums),
@@ -30,16 +33,25 @@ discovering the historical sites along the way.
 
 The app is a static site — no build step, no backend of its own.
 
-- Map rendering uses [Leaflet](https://leafletjs.com/).
-- Address search geocodes through [OpenStreetMap
-  Nominatim](https://nominatim.org/), queried directly by the browser
-  (debounced to stay within its usage policy).
-- Walking directions come from [FOSSGIS's public OSRM foot-routing
-  instance](https://routing.openstreetmap.de/), a free, keyless routing
-  service over OpenStreetMap data — also queried directly by the browser.
-  Both of these are best-effort public infrastructure with no uptime
-  guarantee, the same trade-off this app's sibling `muni_walk` already
-  accepts for its own OpenStreetMap queries.
+- Map rendering uses [Leaflet](https://leafletjs.com/); basemap tiles stay
+  on the free CARTO/OSM/Esri/OpenTopoMap sources muni_walk also uses.
+- Address search (with autocomplete) and walking directions both come from
+  [Mapbox](https://www.mapbox.com/) — the [Geocoding
+  API](https://docs.mapbox.com/api/search/geocoding/) (v6, forward and
+  reverse) and the [Directions
+  API](https://docs.mapbox.com/api/navigation/directions/)'s `walking`
+  profile, queried directly by the browser with a public Mapbox access
+  token. Unlike the Anthropic key below, Mapbox's public tokens are meant
+  to be embedded in client-side code — the security boundary is a URL
+  restriction configured on the token itself (Mapbox account → Tokens →
+  your token → Allowed URLs), not secrecy. Set `MAPBOX_ACCESS_TOKEN` near
+  the top of `js/app.js` to a token from
+  [account.mapbox.com/access-tokens](https://account.mapbox.com/access-tokens/),
+  and restrict it to the origin(s) this app is actually served from.
+  Mapbox's free tier covers 100,000 geocoding requests and 100,000
+  directions requests a month; see [Mapbox's
+  pricing](https://docs.mapbox.com/accounts/guides/pricing/) for current
+  numbers before relying on it at scale.
 - "Historical sites along the route" combines a Cloudflare Worker with
   open, keyless place-data sources: [OpenStreetMap's Overpass
   API](https://overpass-api.de/) supplies OSM-tagged historic sites and
