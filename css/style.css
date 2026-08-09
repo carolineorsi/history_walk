@@ -55,6 +55,7 @@
   }
   .addr-input::placeholder{color:var(--muted);}
   .addr-input:focus{outline:2px solid var(--amber);outline-offset:1px;}
+  .addr-input.active-field{border-color:var(--amber);box-shadow:0 0 0 1px var(--amber);}
   .addr-suggestions{
     display:none;
     position:absolute;top:calc(100% + 4px);left:0;right:0;z-index:1200;

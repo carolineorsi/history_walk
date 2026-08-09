@@ -133,11 +133,7 @@
     marker = L.marker([lat, lon], { icon: endpointIcon(which), draggable: true, zIndexOffset: 700 }).addTo(endpointLayerGroup);
     marker.on('dragend', ()=>{
       const ll = marker.getLatLng();
-      const label = 'Dropped pin (' + ll.lat.toFixed(5) + ', ' + ll.lng.toFixed(5) + ')';
-      if(which === 'start'){ startPoint = { lat: ll.lat, lon: ll.lng }; }
-      else{ endPoint = { lat: ll.lat, lon: ll.lng }; }
-      document.getElementById(which + '-input').value = label;
-      requestRoute();
+      applyPointFromCoordinate(which, ll.lat, ll.lng);
     });
     if(which === 'start') startMarker = marker; else endMarker = marker;
     return marker;
@@ -148,6 +144,73 @@
     if(which === 'start') startPoint = point; else endPoint = point;
     setEndpointMarker(which, lat, lon);
   }
+
+  // ---------- Click/drag-to-place — a fallback for addresses Nominatim's
+  // search can't find ----------
+  // Which field a map click sets. 'start' by default so a first-time user
+  // can place the start pin immediately; auto-advances to the other field
+  // once one point is set, and disarms (null) once both are, so a stray
+  // click near a historical-site pin doesn't silently relocate an endpoint.
+  // Focusing either address input re-arms placement for that field.
+  let activeField = 'start';
+
+  function setActiveField(field){
+    activeField = field;
+    document.getElementById('start-input').classList.toggle('active-field', field === 'start');
+    document.getElementById('end-input').classList.toggle('active-field', field === 'end');
+  }
+
+  function advanceActiveField(justSet){
+    if(justSet === 'start' && !endPoint) setActiveField('end');
+    else if(justSet === 'end' && !startPoint) setActiveField('start');
+    else setActiveField(null);
+  }
+
+  const NOMINATIM_REVERSE_ENDPOINT = "https://nominatim.openstreetmap.org/reverse";
+
+  async function reverseGeocodeLabel(lat, lon){
+    try{
+      const params = new URLSearchParams({ format: 'jsonv2', lat: String(lat), lon: String(lon), zoom: '18', addressdetails: '0' });
+      const res = await fetch(NOMINATIM_REVERSE_ENDPOINT + '?' + params.toString());
+      if(!res.ok) return null;
+      const data = await res.json();
+      return (data && data.display_name) || null;
+    }catch(e){
+      return null;
+    }
+  }
+
+  let reverseGeocodeToken = { start: 0, end: 0 };
+
+  // Sets a point from a raw map coordinate (a map click or a marker drag) —
+  // shows a coordinate label immediately so the pin is usable right away,
+  // then swaps in a reverse-geocoded address once it resolves. Falls back
+  // to the coordinate label if reverse geocoding fails, or is silently
+  // dropped if the field has since changed (a new search, or the point was
+  // moved again before this one resolved).
+  async function applyPointFromCoordinate(which, lat, lon){
+    const token = ++reverseGeocodeToken[which];
+    const input = document.getElementById(which + '-input');
+    hideSuggestions(which);
+    setPoint(which, lat, lon);
+    input.value = 'Pinned location (' + lat.toFixed(5) + ', ' + lon.toFixed(5) + ')';
+    advanceActiveField(which);
+    requestRoute();
+
+    const label = await reverseGeocodeLabel(lat, lon);
+    if(label && token === reverseGeocodeToken[which] && input.value.indexOf('Pinned location') === 0){
+      input.value = label;
+    }
+  }
+
+  map.on('click', (e)=>{
+    if(!activeField) return;
+    const target = e.originalEvent && e.originalEvent.target;
+    // Leaflet already keeps marker clicks from also firing this map-level
+    // click, but guard popups/controls too rather than rely on that alone.
+    if(target && target.closest && target.closest('.leaflet-popup, .leaflet-marker-icon, .leaflet-control')) return;
+    applyPointFromCoordinate(activeField, e.latlng.lat, e.latlng.lng);
+  });
 
   function debounce(fn, wait){
     let t;
@@ -206,6 +269,7 @@
     document.getElementById(which + '-input').value = item.display_name;
     hideSuggestions(which);
     setPoint(which, parseFloat(item.lat), parseFloat(item.lon));
+    advanceActiveField(which);
     requestRoute();
   }
 
@@ -256,10 +320,13 @@
     });
 
     input.addEventListener('blur', ()=> setTimeout(()=> hideSuggestions(which), 150));
+
+    input.addEventListener('focus', ()=> setActiveField(which));
   }
 
   wireAddressInput('start');
   wireAddressInput('end');
+  setActiveField('start');
 
   document.getElementById('use-my-location-btn').addEventListener('click', ()=>{
     if(!('geolocation' in navigator)){
@@ -275,6 +342,7 @@
         hideSuggestions('start');
         document.getElementById('start-input').value = 'My location';
         setPoint('start', lat, lon);
+        advanceActiveField('start');
         map.panTo([lat, lon]);
         requestRoute();
       },
@@ -300,6 +368,7 @@
     const lat = parseFloat(results[0].lat), lon = parseFloat(results[0].lon);
     input.value = results[0].display_name;
     setPoint(which, lat, lon);
+    advanceActiveField(which);
     return { lat, lon };
   }
 
