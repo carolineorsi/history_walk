@@ -514,7 +514,6 @@
     document.getElementById('info-card').classList.remove('collapsed');
     document.getElementById('info-card').classList.add('visible');
     document.getElementById('empty-hint').classList.add('hidden');
-    document.getElementById('history-fab-btn').classList.add('visible');
     updateHistorySearchButtonLabel();
   }
 
@@ -1145,7 +1144,6 @@
 
     clearHistoryResults();
     closeSidePanel(historyCard, historyFabBtn);
-    historyFabBtn.classList.remove('visible');
 
     document.getElementById('history-search-btn').disabled = false;
     updateHistorySearchButtonLabel();
